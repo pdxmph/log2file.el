@@ -6,7 +6,6 @@
 
 A lightweight Emacs utility for quickly capturing timestamped entries into either Org or Markdown files — complete with transient capture windows and file-format-aware heading styles.
 
----
 
 * Features
 - Logs to either Org or Markdown format based on file extension
@@ -16,7 +15,6 @@ A lightweight Emacs utility for quickly capturing timestamped entries into eithe
   - `# Title` for Markdown files
 - Minimal by design: just timestamp, title, and your content
 - Use =log2file-add-current-file= to add a file as a target.
----
 
 * Install
 
@@ -36,7 +34,6 @@ Alternatively, use a directory:
 (setq log2file-dir "~/logs/")
 #+end_src
 
----
 
 * Usage
 
@@ -53,7 +50,6 @@ Add or remove the current file from capture targets:
 
 Finalize with =C-c C-c= or abort with =C-c C-k=.
 
----
 
 * Example Output
 
