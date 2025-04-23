@@ -1,0 +1,82 @@
+#+TITLE: log2file — Format-aware log capture for Emacs
+#+AUTHOR: Mike
+#+OPTIONS: toc:nil num:nil
+
+* log2file 📝
+
+A lightweight Emacs utility for quickly capturing timestamped entries into either Org or Markdown files — complete with transient capture windows and file-format-aware heading styles.
+
+---
+
+* Features
+- Logs to either Org or Markdown format based on file extension
+- Captures in a transient split window, sort of like Org Capture
+- Expects/enforces:
+  - `#+TITLE:` for Org files
+  - `# Title` for Markdown files
+- Minimal by design: just timestamp, title, and your content
+- Use =log2file-add-current-file= to add a file as a target.
+---
+
+* Install
+
+Place =log2file.el= somewhere in your Emacs load path, then:
+
+#+begin_src emacs-lisp
+(use-package log2file
+  :load-path "~/path/to/log2file/"
+  :commands (log2file log2file-add-current-file log2file-remove-current-file)
+  :init
+  (setq log2file-targets '("~/logs/dev.org" "~/logs/notes.md")))
+#+end_src
+
+Alternatively, use a directory:
+
+#+begin_src emacs-lisp
+(setq log2file-dir "~/logs/")
+#+end_src
+
+---
+
+* Usage
+
+Start a capture session:
+
+#+begin_src emacs-lisp
+M-x log2file
+#+end_src
+
+Add or remove the current file from capture targets:
+
+- =M-x log2file-add-current-file=
+- =M-x log2file-remove-current-file=
+
+Finalize with =C-c C-c= or abort with =C-c C-k=.
+
+---
+
+* Example Output
+
+** Org mode
+
+#+begin_example
+#+TITLE: dev
+
+* [2025-04-21 Mon 21:00] Refactored logging
+Took the old md-capture and made it format-aware.
+#+end_example
+
+** Markdown
+
+#+begin_example
+# notes
+
+## [2025-04-21 Mon 21:01] Idea
+Thinking about a unified log system for plain text files.
+#+end_example
+
+---
+
+* License
+
+MIT © Mike
