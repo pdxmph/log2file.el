@@ -1,21 +1,20 @@
-;;; log2file.el --- Simple file-format-aware capture system -*- lexical-binding: t -*-
-
+;;; log2file-transient.el --- Transient-based capture system -*- lexical-binding: t -*-
 ;; Author: Mike
-;; Version: 0.7
+;; Version: 0.8
 ;; Package-Requires: ((emacs "27.1"))
-;; Keywords: markdown, org, convenience, capture
+;; Keywords: markdown, convenience, capture
 ;; URL: https://github.com/pdxmph/log2file
 
 ;;; Commentary:
-;; A lightweight capture system for Org and Markdown files.
+;; A lightweight capture system for Markdown files.
 ;; Creates a transient buffer for writing a timestamped post and saves it to a
 ;; target file without showing the rest of the file during capture.
 ;;
 ;; Modified to display target file titles instead of filenames in the prompt.
 
 ;;; Code:
-(require 'subr-x)  ;; For string-trim
-
+(require 'transient)
+(require 'subr-x) ;; For string-trim
 
 (defgroup log2file nil
   "Multi-format capture system."
@@ -30,21 +29,125 @@
   "Directory from which to use all *.org or *.md files as capture targets."
   :type 'directory)
 
-(defcustom log2file-cli-directory "~/notes/topics/"
-  "Default directory for CLI log2file commands.
-This is prepended to CLI-provided filenames."
-  :type 'directory
-  :group 'log2file)
+(defvar log2file--selected-file nil
+  "Currently selected target file.")
 
-(defcustom log2file-split-size 12
-  "Number of lines high for the capture window split."
-  :type 'integer
-  :group 'log2file)
+(defvar log2file--entry-title nil
+  "Title for the current entry.")
 
 (defvar log2file--destination nil
   "Internal variable storing the destination file during a capture session.")
 
-;;;###autoload
+;; Helper function to extract title from file
+(defun log2file--get-title (file)
+  "Extract title from FILE, checking for frontmatter or headers."
+  (with-temp-buffer
+    (insert-file-contents-literally file nil 0 4096)
+    (goto-char (point-min))
+    (let (title)
+      ;; Check for YAML frontmatter
+      (when (looking-at "---")
+        (forward-line 1)
+        (let ((frontmatter-end (save-excursion
+                                 (search-forward "---" nil t))))
+          (when frontmatter-end
+            (when (re-search-forward "^title:[ \t]*\\(.+\\)" frontmatter-end t)
+              (setq title (string-trim (match-string 1)))))))
+
+      ;; If no title in frontmatter, look for H1 header
+      (unless title
+        (goto-char (point-min))
+        (when (re-search-forward "^# \\(.+\\)" nil t)
+          (setq title (match-string 1))))
+
+      (or title (file-name-base file)))))
+
+;; Function to get available target files
+(defun log2file--get-target-files ()
+  "Return list of available target files."
+  (cond
+   (log2file-targets log2file-targets)
+   (log2file-dir
+    (directory-files-recursively log2file-dir "\\.md\\'"))
+   (t nil)))
+
+;; Function to select target file
+(defun log2file-select-file ()
+  "Select a target file for capture."
+  (interactive)
+  (let* ((files (log2file--get-target-files))
+         (choices (mapcar (lambda (f)
+                            (cons (log2file--get-title f) f))
+                          files))
+         (selected (completing-read "Select target: " choices nil t)))
+    (setq log2file--selected-file (cdr (assoc selected choices)))
+    (message "Selected: %s" (log2file--get-title log2file--selected-file))
+    (transient-setup 'log2file-menu)))
+
+;; Function to set entry title
+(defun log2file-set-title ()
+  "Set title for the capture entry."
+  (interactive)
+  (setq log2file--entry-title (read-string "Entry title: "))
+  (message "Title set: %s" log2file--entry-title)
+  (transient-setup 'log2file-menu))
+
+;; Function to format an entry
+(defun log2file--format-entry (file title)
+  "Format entry for FILE with TITLE."
+  (let ((ts (format-time-string "%Y-%m-%d %a %H:%M")))
+    (format "## [%s] %s\n\n" ts title)))
+
+;; Function to execute capture
+(defun log2file-execute-capture ()
+  "Execute the capture operation."
+  (interactive)
+
+  ;; Validate we have what we need
+  (unless log2file--selected-file
+    (user-error "No target file selected"))
+  (unless log2file--entry-title
+    (user-error "No title set for entry"))
+
+  ;; Create capture buffer
+  (let* ((file log2file--selected-file)
+         (title log2file--entry-title)
+         (entry (log2file--format-entry file title))
+         (buf (generate-new-buffer "*log2file*")))
+
+    (split-window-below -12)
+    (other-window 1)
+    (switch-to-buffer buf)
+    (insert entry)
+    (markdown-mode)
+    (log2file-mode 1)
+    (setq log2file--destination file)
+    (message "C-c C-c to save, C-c C-k to cancel.")))
+
+;; Define the transient menu
+(transient-define-prefix log2file-menu ()
+  "Log2File capture menu."
+  :info-manual "(log2file)"
+
+  ["Setup"
+   ("f" "Select file" log2file-select-file
+    :description
+    (lambda ()
+      (format "Select file [%s]"
+              (if log2file--selected-file
+                  (log2file--get-title log2file--selected-file)
+                "none selected"))))
+   ("t" "Set title" log2file-set-title
+    :description
+    (lambda ()
+      (format "Set title [%s]"
+              (or log2file--entry-title "none set"))))]
+
+  ["Actions"
+   ("c" "Capture now" log2file-execute-capture :if
+    (lambda () (and log2file--selected-file log2file--entry-title)))])
+
+;; The minor mode for editing
 (define-minor-mode log2file-mode
   "Minor mode for log2file capture buffers."
   :lighter " >> Capture"
@@ -54,110 +157,6 @@ This is prepended to CLI-provided filenames."
     (define-key map (kbd "C-c C-k") #'log2file-abort)
     map))
 
-;;;###autoload
-(defun log2file-abort ()
-  "Abort the current capture session without saving."
-  (interactive)
-  (log2file--cleanup)
-  (message "Capture aborted."))
-
-(defun log2file--format-type (file)
-  "Return symbol 'org or 'markdown based on FILE extension."
-  (cond ((string-match-p "\\.org\\'" file)      'org)
-        ((string-match-p "\\.md\\'"  file)      'markdown)
-        (t (user-error "Unsupported file type: %s" file))))
-
-(defun log2file--format-entry (file title)
-  "Return a formatted entry string for FILE with TITLE."
-  (let ((ts (format-time-string "%Y-%m-%d %a %H:%M")))
-    (pcase (log2file--format-type file)
-      ('org      (format "* [%s] %s " ts title))
-      ('markdown (format "## [%s] %s " ts title)))))
-
-(defun log2file--get-title (file)
-  "Extract and return the TITLE from FILE.
-Checks for Org #+TITLE:, Markdown # header, or YAML frontmatter title:.
-Falls back to the file's basename if no title is found."
-  (with-temp-buffer
-    (insert-file-contents-literally file nil 0 4096)
-    (goto-char (point-min))
-    (let ((type (log2file--format-type file))
-          title)
-      (pcase type
-        ('org
-         (when (re-search-forward "^#\\+TITLE:[ \t]*\\(.+\\)" nil t)
-           (setq title (match-string 1))))
-        ('markdown
-         ;; Check for YAML frontmatter
-         (goto-char (point-min))
-         (when (looking-at "---")
-           (forward-line 1)
-           (let ((frontmatter-end (save-excursion
-                                    (search-forward "---" nil t))))
-             (when frontmatter-end
-               (when (re-search-forward "^title:[ \t]*\\(.+\\)" frontmatter-end t)
-                 (setq title (string-trim (match-string 1)))))))
-         ;; If no title found in frontmatter, look for H1
-         (unless title
-           (goto-char (point-min))
-           (when (re-search-forward "^# \\(.+\\)" nil t)
-             (setq title (match-string 1)))))
-        (_ nil))
-      (or title (file-name-base file)))))
-
-;;;###autoload
-(defun log2file-add-current-file ()
-  "Add the current file to `log2file-targets`."
-  (interactive)
-  (let ((p (buffer-file-name)))
-    (unless p (user-error "Not visiting a file"))
-    (unless (member p log2file-targets)
-      (customize-save-variable 'log2file-targets (add-to-list 'log2file-targets p))
-      (message "Added %s" p))))
-
-;;;###autoload
-(defun log2file-remove-current-file ()
-  "Remove the current file from `log2file-targets`."
-  (interactive)
-  (let ((p (buffer-file-name)))
-    (unless p (user-error "Not visiting a file"))
-    (when (member p log2file-targets)
-      (customize-save-variable 'log2file-targets (delete p log2file-targets))
-      (message "Removed %s" p))))
-
-;;;###autoload
-(defun log2file ()
-  "Start a capture session for Org or Markdown files, selecting target by title."
-  (interactive)
-  (let* ((files
-          (cond
-           (log2file-targets log2file-targets)
-           (log2file-dir
-            (directory-files-recursively log2file-dir "\\.\\(?:org\\|md\\)\\'"))
-           (t (user-error "No targets or directory defined"))))
-         (choices
-          (mapcar (lambda (f)
-                    (cons (log2file--get-title f) f))
-                  files))
-         (dest
-          (cdr (assoc
-                (completing-read "Capture to (by title): " choices nil t)
-                choices)))
-         (ttl   (read-string "Title: "))
-         (entry (log2file--format-entry dest ttl))
-         (buf   (generate-new-buffer "*log2file*")))
-    (split-window-below (- log2file-split-size))
-    (other-window 1)
-    (switch-to-buffer buf)
-    (insert entry)
-    (funcall (if (eq (log2file--format-type dest) 'org)
-                 #'org-mode
-               #'markdown-mode))
-    (log2file-mode 1)
-    (setq log2file--destination dest)
-    (message "C-c C-c to save, C-c C-k to cancel.")))
-
-;; Helper function for finding insert position in Markdown files
 (defun log2file--find-markdown-insert-position (file)
   "Find insert position in a Markdown FILE.
 Returns the position to insert new entries."
@@ -188,36 +187,6 @@ Returns the position to insert new entries."
         (setq found-title t)))
     (cons found-title title-pos)))
 
-;; Helper function for finding insert position in Org files
-(defun log2file--find-org-insert-position (file)
-  "Find insert position in an Org FILE.
-Returns the position to insert new entries."
-  (let ((title-pos nil)
-        (found-title nil))
-    ;; Check for #+TITLE
-    (goto-char (point-min))
-    (if (re-search-forward "^#\\+TITLE:" nil t)
-        (progn
-          (end-of-line)
-          (forward-line 1)
-          (setq title-pos (point))
-          (setq found-title t))
-      ;; If no #+TITLE, check for L1 heading
-      (goto-char (point-min))
-      (if (re-search-forward "^\\* " nil t)
-          (progn
-            (end-of-line)
-            (forward-line 1)
-            (setq title-pos (point))
-            (setq found-title t))
-        ;; No title found, add one
-        (goto-char (point-min))
-        (insert (format "#+TITLE: %s\n\n" (file-name-base file)))
-        (setq title-pos (point))
-        (setq found-title t)))
-    (cons found-title title-pos)))
-
-;;;###autoload
 (defun log2file-finalize ()
   "Save and close the capture session."
   (interactive)
@@ -227,13 +196,7 @@ Returns the position to insert new entries."
 
     ;; Insert content into the destination file
     (with-current-buffer (find-file-noselect file)
-      (let* ((file-type (log2file--format-type file))
-             (position-info
-              (pcase file-type
-                ('markdown (log2file--find-markdown-insert-position file))
-                ('org (log2file--find-org-insert-position file))
-                (_ (cons nil nil)))))
-
+      (let* ((position-info (log2file--find-markdown-insert-position file)))
         ;; Now insert the entry at the right position
         (if (car position-info)
             (progn
@@ -251,6 +214,12 @@ Returns the position to insert new entries."
 
     (message "Saved to %s" file)))
 
+(defun log2file-abort ()
+  "Abort the current capture session without saving."
+  (interactive)
+  (log2file--cleanup)
+  (message "Capture aborted."))
+
 (defun log2file--cleanup ()
   "Close window and kill buffer."
   (when (and (window-live-p (selected-window))
@@ -259,54 +228,10 @@ Returns the position to insert new entries."
   (kill-buffer (current-buffer)))
 
 ;;;###autoload
-(defun log2file-cli-capture (fn ttl)
-  "CLI: capture TTL to FN (expanded in `log2file-cli-directory`)."
-  (let* ((file  (expand-file-name fn log2file-cli-directory))
-         (entry (log2file--format-entry file ttl)))
-    (unless (file-directory-p (file-name-directory file))
-      (make-directory (file-name-directory file) :parents))
-    (unless (file-exists-p file)
-      (with-temp-buffer (write-file file)))
-    (log2file--insert-entry file entry)
-    (message "Logged to %s" file)))
+(defun log2file ()
+  "Start log2file capture process using transient UI."
+  (interactive)
+  (transient-setup 'log2file-menu))
 
-;;;###autoload
-(defun log2file-cli-edit (fn ttl)
-  "CLI: open capture buffer for FN with TTL."
-  (let* ((file (expand-file-name fn log2file-cli-directory))
-         (head (log2file--format-entry file ttl))
-         (buf  (generate-new-buffer "*log2file*")))
-    (switch-to-buffer buf)
-    (insert head)
-    (funcall (if (eq (log2file--format-type file) 'org)
-                 #'org-mode
-               #'markdown-mode))
-    (log2file-mode 1)
-    (setq log2file--destination file)
-    (message "Editing %s" file)))
-
-;; Legacy function to maintain compatibility with other function calls
-(defun log2file--insert-entry (file entry)
-  "Insert ENTRY into FILE after frontmatter/title but before other headings.
-This is a compatibility function that uses the new helper functions."
-  (with-current-buffer (find-file-noselect file)
-    (let* ((file-type (log2file--format-type file))
-           (position-info
-            (pcase file-type
-              ('markdown (log2file--find-markdown-insert-position file))
-              ('org (log2file--find-org-insert-position file))
-              (_ (cons nil nil)))))
-
-      ;; Now insert the entry at the right position
-      (if (car position-info)
-          (progn
-            (goto-char (cdr position-info))
-            ;; Ensure there's a blank line before our new entry if there's content
-            (unless (looking-at "^$")
-              (insert "\n"))
-            (insert entry "\n\n")
-            (save-buffer))
-        (message "Something went wrong finding title position")))))
-
-(provide 'log2file)
-;;; log2file.el ends here
+(provide 'log2file-transient)
+;;; log2file-transient.el ends here
