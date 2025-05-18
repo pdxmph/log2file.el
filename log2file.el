@@ -1,7 +1,7 @@
 ;;; log2file.el --- Simple file-format-aware capture system -*- lexical-binding: t -*-
 
 ;; Author: Mike
-;; Version: 0.6
+;; Version: 0.7
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: markdown, org, convenience, capture
 ;; URL: https://github.com/pdxmph/log2file
@@ -14,6 +14,8 @@
 ;; Modified to display target file titles instead of filenames in the prompt.
 
 ;;; Code:
+(require 'subr-x)  ;; For string-trim
+
 
 (defgroup log2file nil
   "Multi-format capture system."
@@ -73,10 +75,11 @@ This is prepended to CLI-provided filenames."
       ('markdown (format "## [%s] %s " ts title)))))
 
 (defun log2file--get-title (file)
-  "Extract and return the TITLE from FILE’s first Org `#+TITLE:` or Markdown `# ` header.
-If none is found, fall back to the file’s basename."
+  "Extract and return the TITLE from FILE.
+Checks for Org #+TITLE:, Markdown # header, or YAML frontmatter title:.
+Falls back to the file's basename if no title is found."
   (with-temp-buffer
-    (insert-file-contents-literally file nil 0 1024)
+    (insert-file-contents-literally file nil 0 4096)
     (goto-char (point-min))
     (let ((type (log2file--format-type file))
           title)
@@ -85,8 +88,20 @@ If none is found, fall back to the file’s basename."
          (when (re-search-forward "^#\\+TITLE:[ \t]*\\(.+\\)" nil t)
            (setq title (match-string 1))))
         ('markdown
-         (when (re-search-forward "^# \\(.+\\)" nil t)
-           (setq title (match-string 1))))
+         ;; Check for YAML frontmatter
+         (goto-char (point-min))
+         (when (looking-at "---")
+           (forward-line 1)
+           (let ((frontmatter-end (save-excursion
+                                    (search-forward "---" nil t))))
+             (when frontmatter-end
+               (when (re-search-forward "^title:[ \t]*\\(.+\\)" frontmatter-end t)
+                 (setq title (string-trim (match-string 1)))))))
+         ;; If no title found in frontmatter, look for H1
+         (unless title
+           (goto-char (point-min))
+           (when (re-search-forward "^# \\(.+\\)" nil t)
+             (setq title (match-string 1)))))
         (_ nil))
       (or title (file-name-base file)))))
 
@@ -142,14 +157,98 @@ If none is found, fall back to the file’s basename."
     (setq log2file--destination dest)
     (message "C-c C-c to save, C-c C-k to cancel.")))
 
+;; Helper function for finding insert position in Markdown files
+(defun log2file--find-markdown-insert-position (file)
+  "Find insert position in a Markdown FILE.
+Returns the position to insert new entries."
+  (let ((title-pos nil)
+        (found-title nil))
+    ;; Check for YAML frontmatter
+    (goto-char (point-min))
+    (if (looking-at "---")
+        (progn
+          (forward-line 1) ;; Skip first ---
+          (if (search-forward "---" nil t) ;; Find closing ---
+              (progn
+                (forward-line 1) ;; Move to line after closing ---
+                (setq title-pos (point))
+                (setq found-title t))))
+      ;; If no frontmatter, check for level 1 heading
+      (goto-char (point-min))
+      (if (re-search-forward "^# " nil t)
+          (progn
+            (end-of-line)
+            (forward-line 1)
+            (setq title-pos (point))
+            (setq found-title t))
+        ;; No title found, add one
+        (goto-char (point-min))
+        (insert (format "# %s\n\n" (file-name-base file)))
+        (setq title-pos (point))
+        (setq found-title t)))
+    (cons found-title title-pos)))
+
+;; Helper function for finding insert position in Org files
+(defun log2file--find-org-insert-position (file)
+  "Find insert position in an Org FILE.
+Returns the position to insert new entries."
+  (let ((title-pos nil)
+        (found-title nil))
+    ;; Check for #+TITLE
+    (goto-char (point-min))
+    (if (re-search-forward "^#\\+TITLE:" nil t)
+        (progn
+          (end-of-line)
+          (forward-line 1)
+          (setq title-pos (point))
+          (setq found-title t))
+      ;; If no #+TITLE, check for L1 heading
+      (goto-char (point-min))
+      (if (re-search-forward "^\\* " nil t)
+          (progn
+            (end-of-line)
+            (forward-line 1)
+            (setq title-pos (point))
+            (setq found-title t))
+        ;; No title found, add one
+        (goto-char (point-min))
+        (insert (format "#+TITLE: %s\n\n" (file-name-base file)))
+        (setq title-pos (point))
+        (setq found-title t)))
+    (cons found-title title-pos)))
+
 ;;;###autoload
 (defun log2file-finalize ()
   "Save and close the capture session."
   (interactive)
-  (let ((cnt  (string-trim-right (buffer-string)))
-        (file log2file--destination))
-    (log2file--insert-entry file cnt)
-    (log2file--cleanup)
+  (let ((cnt (string-trim-right (buffer-string)))
+        (file log2file--destination)
+        (capture-buffer (current-buffer)))
+
+    ;; Insert content into the destination file
+    (with-current-buffer (find-file-noselect file)
+      (let* ((file-type (log2file--format-type file))
+             (position-info
+              (pcase file-type
+                ('markdown (log2file--find-markdown-insert-position file))
+                ('org (log2file--find-org-insert-position file))
+                (_ (cons nil nil)))))
+
+        ;; Now insert the entry at the right position
+        (if (car position-info)
+            (progn
+              (goto-char (cdr position-info))
+              ;; Ensure there's a blank line before our new entry if there's content
+              (unless (looking-at "^$")
+                (insert "\n"))
+              (insert cnt "\n\n")
+              (save-buffer))
+          (message "Something went wrong finding title position"))))
+
+    ;; Return to the capture buffer to clean up
+    (with-current-buffer capture-buffer
+      (log2file--cleanup))
+
     (message "Saved to %s" file)))
 
 (defun log2file--cleanup ()
@@ -186,38 +285,28 @@ If none is found, fall back to the file’s basename."
     (setq log2file--destination file)
     (message "Editing %s" file)))
 
-;;;###autoload
+;; Legacy function to maintain compatibility with other function calls
 (defun log2file--insert-entry (file entry)
-  "Insert ENTRY into FILE above first heading or at end."
+  "Insert ENTRY into FILE after frontmatter/title but before other headings.
+This is a compatibility function that uses the new helper functions."
   (with-current-buffer (find-file-noselect file)
-    ;; ensure title
-    (save-excursion
-      (goto-char (point-min))
-      (skip-chars-forward " \t\n")
-      (let ((rx  (if (eq (log2file--format-type file) 'org) "^#\\+TITLE:" "^# "))
-            (blk (if (eq (log2file--format-type file) 'org)
-                     (format "#+TITLE: %s\n\n" (file-name-base file))
-                   (format "# %s\n\n"   (file-name-base file)))))
-        (unless (looking-at rx)
-          (goto-char (point-min))
-          (insert blk))))
-    ;; insert entry
-    (goto-char (point-min))
-    (let* ((hdr (if (eq (log2file--format-type file) 'org) "^* " "^## "))
-           (pos (if (re-search-forward hdr nil t)
-                    (progn
-                      (beginning-of-line)
-                      (while (and (not (bobp))
-                                  (save-excursion
-                                    (forward-line -1)
-                                    (looking-at "^[ \t]*$")))
-                        (forward-line -1)
-                        (delete-blank-lines))
-                      (point))
-                  (point-max))))
-      (goto-char pos)
-      (insert (concat "\n" entry "\n"))
-      (save-buffer))))
+    (let* ((file-type (log2file--format-type file))
+           (position-info
+            (pcase file-type
+              ('markdown (log2file--find-markdown-insert-position file))
+              ('org (log2file--find-org-insert-position file))
+              (_ (cons nil nil)))))
+
+      ;; Now insert the entry at the right position
+      (if (car position-info)
+          (progn
+            (goto-char (cdr position-info))
+            ;; Ensure there's a blank line before our new entry if there's content
+            (unless (looking-at "^$")
+              (insert "\n"))
+            (insert entry "\n\n")
+            (save-buffer))
+        (message "Something went wrong finding title position")))))
 
 (provide 'log2file)
 ;;; log2file.el ends here
